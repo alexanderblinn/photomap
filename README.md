@@ -13,7 +13,7 @@ README.md for the `photomap` repository.
 <br />
 <div align="center">
   <a href="https://github.com/alexanderblinn/photomap">
-    <img src="logo/logo.png" alt="Logo" width="511" height="253">
+    <img src="logo/logo.png" alt="Logo" width="715" height="354">
   </a>
 
   <h3 align="center">photomap</h3>
