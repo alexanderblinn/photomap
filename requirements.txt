@@ -1,0 +1,11 @@
+# Core
+Pillow>=10.3.0
+exifread>=3.0.0
+piexif>=1.1.3
+# HEIC/HEIF support (optional; falls back if not installed)
+pillow-heif>=0.16.0
+# Mapping
+folium>=0.17.0
+branca>=0.7.2
+# Data
+pandas>=2.2.2
