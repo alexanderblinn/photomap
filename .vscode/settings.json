@@ -10,6 +10,15 @@
     "python.envFile": "${workspaceFolder}/.env",
     "python.terminal.activateEnvironment": true,
     "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python",
+    // Files to exclude from the explorer
+    "files.exclude": {
+        "**/.git": true,
+        "**/.gitignore": true,
+        "**/.gitattributes": true,
+        "**/.env": false,
+        "**/.venv": false
+    },
+    "explorer.excludeGitIgnore": false,
     // Workbench settings
     "workbench.editor.editorActionsLocation": "default",
     "workbench.colorCustomizations": {
