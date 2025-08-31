@@ -29,7 +29,7 @@ def _add_basemaps(fmap: folium.Map, default_name: str = "CartoDB Positron"):
         folium.TileLayer(**kwargs).add_to(fmap)
 
 
-# ---------------- CSS: layout, sidebar, gallery, popup sizing ----------------
+# ---------------- CSS: layout, sidebar, gallery, popup/overlay ----------------
 def _css_for(map_id: str) -> str:
     return f"""
 <style>
@@ -105,26 +105,25 @@ html, body {{
 
 /* Fullscreen lightbox for original images */
 #photo-overlay {{
-        position: fixed; inset: 0;
+  position: fixed; inset: 0;
   background: rgba(0,0,0,0.8);
   display: none;         /* toggled via JS */
   align-items: center; justify-content: center;
   z-index: 10000;        /* above sidebar & map */
 }}
 #photo-overlay img {{
-        max - width: 95vw; max-height: 95vh;
+  max-width: 95vw; max-height: 95vh; /* <-- fixed typo: max-width */
   width: auto; height: auto;
   border-radius: 10px;
   box-shadow: 0 10px 30px rgba(0,0,0,0.5);
 }}
 #photo-overlay .close {{
-        position: absolute; top: 14px; right: 14px;
+  position: absolute; top: 14px; right: 14px;
   background: rgba(255,255,255,0.9);
   border: 0; border-radius: 999px;
   padding: 8px 12px; font-size: 14px; cursor: pointer;
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
 }}
-
 </style>
 """
 
@@ -151,6 +150,7 @@ def _sidebar_html() -> str:
 """
 
 
+# ---------------- JS: viewport gallery + selection marker + overlay ----------------
 _VIEWPORT_JS = """
 <script>
 (function(){
@@ -162,7 +162,7 @@ _VIEWPORT_JS = """
     init(map);
   }
 
-  // ---------- GLOBAL: open-overlay helper (callable from inline onclick) ----------
+  // ---------- GLOBAL overlay (callable inline) ----------
   let overlay, overlayImg, overlayClose;
   function ensureOverlay(){
     if (overlay) return overlay;
@@ -183,11 +183,7 @@ _VIEWPORT_JS = """
     overlayImg.src = src;
     overlay.style.display='flex';
   }
-  // Make it callable from inline HTML
-  window.__PHOTO_OPEN_ORIGINAL = function(src, title){
-    if (!src) return;
-    openOverlay(src, title || '');
-  };
+  window.__PHOTO_OPEN_ORIGINAL = function(src, title){ if (!src) return; openOverlay(src, title||''); };
 
   // ---------- selection state ----------
   let selectionLayer=null, selectionMarker=null, selectedId=null;
@@ -197,17 +193,36 @@ _VIEWPORT_JS = """
     const c=(f.geometry&&f.geometry.coordinates)||[], p=(f.properties&&(f.properties.path||f.properties.filename))||"";
     return [String(c[0]||""),String(c[1]||""),String(p||"")].join("|");
   }
-  function clearSelectionHighlight(){
-    selectedId=null;
-    document.querySelectorAll('#gallery-grid .tile, #gallery-grid img').forEach(el=>el.classList.remove('selected'));
+  function clearSelectionHighlight(){ selectedId=null; document.querySelectorAll('#gallery-grid .tile, #gallery-grid img').forEach(el=>el.classList.remove('selected')); }
+  function highlightTileById(id){ document.querySelectorAll('#gallery-grid [data-fid]').forEach(el=>{ if (el.getAttribute('data-fid')===id) el.classList.add('selected'); else el.classList.remove('selected'); }); }
+
+  // ---------- robust visibility (avoid sidebar-covered area) ----------
+  function visibleContainerBounds(map){
+    const c = map.getContainer();
+    const cw = c.clientWidth, ch = c.clientHeight;
+    let visibleRight = cw; // default full width
+    const sidebar = document.getElementById('gallery-panel');
+    if (sidebar){
+      const mr = c.getBoundingClientRect();
+      const sr = sidebar.getBoundingClientRect();
+      const overlapX = Math.max(0, Math.min(mr.right, sr.right) - Math.max(mr.left, sr.left));
+      const overlapY = Math.max(0, Math.min(mr.bottom, sr.bottom) - Math.max(mr.top, sr.top));
+      if (overlapY > 0 && overlapX > 0) visibleRight = Math.max(0, cw - overlapX);
+    }
+    return L.bounds(L.point(0,0), L.point(visibleRight, ch));
   }
-  function highlightTileById(id){
-    document.querySelectorAll('#gallery-grid [data-fid]').forEach(el=>{
-      if (el.getAttribute('data-fid')===id) el.classList.add('selected'); else el.classList.remove('selected');
-    });
+  function isInVisibleViewport(map, lat, lon){
+    const p = map.latLngToContainerPoint([lat, lon]);
+    const b = visibleContainerBounds(map);
+    return b.contains(p);
+  }
+  function featuresInViewport(map, features){
+    const inside = [];
+    (features||[]).forEach(f=>{ try{ const c=f.geometry&&f.geometry.coordinates; if(!c) return; const lat=c[1], lon=c[0]; if (isInVisibleViewport(map, lat, lon)) inside.push(f); }catch(e){} });
+    return inside;
   }
 
-  // ---------- Popup with THUMB (img has inline onclick to open ORIGINAL) ----------
+  // ---------- thumb popup (click to open full overlay) ----------
   function escapeAttr(s){ return String(s||'').replace(/"/g,'&quot;'); }
   function thumbPopupHTML(props){
     const title = (props && (props.path || props.filename)) || "photo";
@@ -217,8 +232,8 @@ _VIEWPORT_JS = """
     if (thumbSrc){
       if (fullSrc){
         html += '<img src="'+thumbSrc+'" alt="'+escapeAttr(title)+'" ' +
-                'onclick="window.__PHOTO_OPEN_ORIGINAL(\\''+escapeAttr(fullSrc)+'\\', \\''
-                +escapeAttr(title)+'\\')" ' +
+                'data-full="'+escapeAttr(fullSrc)+'" ' +
+                'onclick="window.__PHOTO_OPEN_ORIGINAL(this.getAttribute(\\'data-full\\'), this.alt)" ' +
                 'style="max-width: 520px; max-height: 400px; width:auto; height:auto; border-radius:10px; display:block; margin:0 auto 6px; cursor:zoom-in;" />';
         html += '<div style="font-size:11px; color:#555;">Click the image to view full size</div>';
       } else {
@@ -232,7 +247,7 @@ _VIEWPORT_JS = """
     return html;
   }
 
-  // ---------- marker placement (popup shows THUMB; clicking it opens ORIGINAL overlay) ----------
+  // ---------- marker placement (popup shows THUMB; click opens ORIGINAL overlay) ----------
   function placeSelectionMarker(map, lat, lon, props, fid){
     ensureSelectionLayer(map);
     if (selectionMarker){ try{ selectionLayer.removeLayer(selectionMarker); }catch(e){} selectionMarker=null; }
@@ -242,9 +257,7 @@ _VIEWPORT_JS = """
       icon: L.icon({
         iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png",
         shadowUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.3/images/marker-shadow.png",
-        iconSize: [25, 41],
-        iconAnchor: [12, 41],
-        popupAnchor: [1, -34]
+        iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34]
       })
     });
 
@@ -253,29 +266,14 @@ _VIEWPORT_JS = """
       .bindPopup(thumbPopupHTML(props), {maxWidth: 560, keepInView: true, className: "photo-popup"})
       .openPopup();
 
-    selectionMarker.on("popupclose", function(){
-      try{ selectionLayer.removeLayer(selectionMarker); }catch(e){}
-      selectionMarker=null; clearSelectionHighlight();
-    });
+    selectionMarker.on("popupclose", function(){ try{ selectionLayer.removeLayer(selectionMarker); }catch(e){} selectionMarker=null; clearSelectionHighlight(); });
 
     map.setView([lat, lon], Math.max(12, map.getZoom()), {animate: true});
-    selectedId = fid || null;
-    if (selectedId) highlightTileById(selectedId);
+    selectedId = fid || null; if (selectedId) highlightTileById(selectedId);
   }
 
   // ---------- gallery / filtering ----------
-  function featuresInView(map, features){
-    const b = map.getBounds(), inside=[];
-    (features||[]).forEach(f=>{
-      try{ const c=f.geometry&&f.geometry.coordinates; if(!c) return;
-        const ll=L.latLng(c[1],c[0]); if(b.contains(ll)) inside.push(f); }catch(e){}
-    });
-    return inside;
-  }
-  function makeTextTile(text, fid, click){
-    const div=document.createElement('div'); div.className='tile'; div.setAttribute('data-fid', fid||'');
-    div.textContent=text||'No preview'; if(click) div.onclick=click; return div;
-  }
+  function makeTextTile(text, fid, click){ const div=document.createElement('div'); div.className='tile'; div.setAttribute('data-fid', fid||''); div.textContent=text||'No preview'; if(click) div.onclick=click; return div; }
   function renderGallery(features){
     const grid=document.getElementById('gallery-grid');
     const empty=document.getElementById('gallery-empty');
@@ -289,18 +287,13 @@ _VIEWPORT_JS = """
       const fid=featureId(f), props=f.properties||{}, alt=props.path||'photo';
       const coords=f.geometry&&f.geometry.coordinates;
       const thumbSrc = props.thumb; // thumbs ONLY in sidebar
-      const click = function(){
-        const map=getLeafletMap();
-        if (!map || !coords || coords.length<2) return;
-        placeSelectionMarker(map, coords[1], coords[0], props, fid);
-      };
+      const click = function(){ const map=getLeafletMap(); if (!map || !coords || coords.length<2) return; placeSelectionMarker(map, coords[1], coords[0], props, fid); };
 
       if (thumbSrc){
         const img=document.createElement('img');
         img.src=thumbSrc; img.alt=alt; img.title=alt; img.setAttribute('data-fid', fid||'');
         img.onerror=function(){ const t=makeTextTile(alt,fid,click); img.replaceWith(t); if(selectedId===fid) t.classList.add('selected'); };
-        img.onclick=click;
-        if(selectedId===fid) img.classList.add('selected');
+        img.onclick=click; if(selectedId===fid) img.classList.add('selected');
         grid.appendChild(img);
       } else {
         const t=makeTextTile(alt,fid,click); if(selectedId===fid) t.classList.add('selected'); grid.appendChild(t);
@@ -308,7 +301,6 @@ _VIEWPORT_JS = """
     });
   }
 
-  // Clustered markers: clicking a point opens the overlay directly (optional)
   function bindMarkerPopups(map){
     try{
       map.eachLayer(function(layer){
@@ -319,15 +311,16 @@ _VIEWPORT_JS = """
             l.bindPopup(thumbPopupHTML(props), {maxWidth:560, keepInView:true, className:"photo-popup"});
             l.on('popupopen', function(){ selectedId=fid; highlightTileById(selectedId); });
             l.on('popupclose', function(){ clearSelectionHighlight(); });
-            // Clicking the marker itself also opens original (convenience)
-            l.on('click', function(){
-              const fullSrc = props && props.img_rel;
-              if (fullSrc) window.__PHOTO_OPEN_ORIGINAL(fullSrc, props.path || props.filename);
-            });
+            l.on('click', function(){ const fullSrc = props && props.img_rel; if (fullSrc) window.__PHOTO_OPEN_ORIGINAL(fullSrc, props.path || props.filename); });
           });
         }
       });
     }catch(e){}
+  }
+
+  function recomputeAndRender(map, all, showAll){
+    const feats = (showAll && showAll.checked) ? all : featuresInViewport(map, all);
+    renderGallery(feats); if (selectedId) highlightTileById(selectedId);
   }
 
   function init(map){
@@ -336,29 +329,21 @@ _VIEWPORT_JS = """
     document.getElementById('total-count').textContent=String(all.length);
 
     const showAll=document.getElementById('show-all');
-    const initial=(showAll && showAll.checked) ? all : featuresInView(map, all);
+    const initial=(showAll && showAll.checked) ? all : featuresInViewport(map, all);
     renderGallery(initial);
 
     const follow=document.getElementById('follow-map');
-    map.on('moveend', function(){
-      if (follow && follow.checked) {
-        const feats=(showAll && showAll.checked) ? all : featuresInView(map, all);
-        renderGallery(feats); if (selectedId) highlightTileById(selectedId);
-      }
-    });
+    map.on('moveend', function(){ if (follow && follow.checked) recomputeAndRender(map, all, showAll); });
 
     const refreshBtn=document.getElementById('gallery-refresh');
-    if (refreshBtn) refreshBtn.addEventListener('click', function(){
-      const feats=(showAll && showAll.checked) ? all : featuresInView(map, all);
-      renderGallery(feats); if (selectedId) highlightTileById(selectedId);
-    });
+    if (refreshBtn) refreshBtn.addEventListener('click', function(){ recomputeAndRender(map, all, showAll); });
 
-    if (showAll) showAll.addEventListener('change', function(){
-      const feats=(showAll.checked) ? all : featuresInView(map, all);
-      renderGallery(feats); if (selectedId) highlightTileById(selectedId);
-    });
+    if (showAll) showAll.addEventListener('change', function(){ recomputeAndRender(map, all, showAll); });
+
+    window.addEventListener('resize', function(){ recomputeAndRender(map, all, showAll); });
 
     bindMarkerPopups(map);
+    console.debug("[photo-map] total features:", all.length);
   }
 
   waitForMapAndInit(30);
@@ -412,7 +397,6 @@ class MapBuilder:
         if include_heat and points:
             HeatMap(
                 points,
-                # gradient={0.0: 'blue', 0.4: 'lime', 0.7: 'orange', 1.0: 'red'},
                 min_opacity=heat_min_opacity,
                 radius=heat_radius,
                 blur=heat_blur,
